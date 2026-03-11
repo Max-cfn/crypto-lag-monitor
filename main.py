@@ -13,7 +13,7 @@ import sys
 
 import config
 from lag_analyzer import LagAnalyzer, BinanceTick, PolymarketTick
-from binance_ws import stream_binance_trades
+from binance_ws import BinanceTradeStream
 from polymarket_ws import stream_polymarket_prices
 import discord_logger
 
@@ -42,13 +42,13 @@ async def run() -> None:
     # Callbacks
     # ------------------------------------------------------------------
 
-    async def handle_binance_tick(tick: dict) -> None:
+    async def handle_significant_move(move: dict) -> None:
+        await discord_logger.log_raw_tick("Binance move", move)
         bt = BinanceTick(
-            price=tick["price"],
-            timestamp_ms=tick["timestamp_ms"],
-            received_ms=tick["received_ms"],
+            price=move["price_after"],
+            timestamp_ms=move["timestamp_ms"],
+            received_ms=move["timestamp_ms"],
         )
-        await discord_logger.log_raw_tick("Binance", tick)
         event = analyzer.on_binance_tick(bt)
         if event is not None:
             await discord_logger.log_lag_event(event)
@@ -93,9 +93,14 @@ async def run() -> None:
     # ------------------------------------------------------------------
     # Launch all coroutines
     # ------------------------------------------------------------------
+    binance_stream = BinanceTradeStream(
+        on_significant_move=handle_significant_move,
+        stop_event=stop_event,
+    )
+
     logger.info("crypto-lag-monitor starting…")
     await asyncio.gather(
-        stream_binance_trades(handle_binance_tick, stop_event),
+        binance_stream.run(),
         stream_polymarket_prices(handle_polymarket_tick, stop_event),
         stats_loop(),
     )
