@@ -108,6 +108,29 @@ class PolymarketPriceStream:
         """Return the most recent mid price, or None if no data yet."""
         return self._last_mid
 
+    def swap_token(self, new_token_id: str) -> None:
+        """Replace the subscribed token_id and signal a reconnect.
+
+        The running ``_connect_and_stream`` loop will exit at the next message
+        boundary (``stop_event`` is briefly set then cleared) and re-subscribe
+        with the new token.  History and last_mid are reset.
+        """
+        logger.info(
+            "Swapping Polymarket token: %s → %s", self.token_id, new_token_id
+        )
+        self.token_id = new_token_id
+        self.price_history.clear()
+        self._last_mid = None
+        self.last_significant_reprice = None
+        # Signal the inner loop to break and reconnect
+        self._reconnect_requested = True
+
+    def _should_reconnect(self) -> bool:
+        if getattr(self, "_reconnect_requested", False):
+            self._reconnect_requested = False
+            return True
+        return False
+
     def get_price_at(self, timestamp_ms: int) -> Optional[float]:
         """Return the mid price whose timestamp is closest to timestamp_ms.
 
@@ -135,6 +158,9 @@ class PolymarketPriceStream:
             await self._subscribe(ws)
             async for raw in ws:
                 if self._stop_event.is_set():
+                    return
+                if self._should_reconnect():
+                    # token swapped — break to let run() reconnect immediately
                     return
                 await self._handle_message(raw)
 
