@@ -4,7 +4,7 @@ from typing import Optional
 import aiohttp
 
 import config
-from lag_analyzer import LagEvent
+from lag_analyzer import LagMeasurement
 
 logger = logging.getLogger(__name__)
 
@@ -36,43 +36,46 @@ async def log_raw_tick(source: str, data: dict) -> None:
     await _post(config.DISCORD_WEBHOOK_RAW_TICKS, {"content": content})
 
 
-async def log_lag_event(event: LagEvent) -> None:
-    """Log a detected lag event to the LAG_EVENTS channel."""
-    lag_str = f"{event.lag_ms} ms" if event.lag_ms is not None else "pending"
+async def log_lag_measurement(m: LagMeasurement) -> None:
+    """Log a completed LagMeasurement to the LAG_EVENTS channel."""
+    move = m.binance_move
+    lag_str = f"{m.lag_ms} ms" if m.lag_ms is not None else "NO_REPRICE"
+    color = 0x00FF00 if m.repriced and m.direction_match else (0xFFA500 if m.repriced else 0xFF0000)
     embed = {
-        "title": "Lag Event Detected",
-        "color": 0xFFA500,
+        "title": "Lag Measurement",
+        "color": color,
         "fields": [
-            {"name": "Binance price", "value": f"${event.binance_price:,.2f}", "inline": True},
-            {"name": "Move (USD)", "value": f"${event.binance_move_usd:,.2f}", "inline": True},
+            {"name": "Binance move", "value": f"{move.get('direction')} ${move.get('price_after', 0):,.2f} (Δ${move.get('delta_usd', 0):+.2f})", "inline": False},
+            {"name": "Poly at move", "value": f"{m.polymarket_price_at_move:.4f}", "inline": True},
+            {"name": "Poly after reprice", "value": f"{m.polymarket_price_after_reprice:.4f}" if m.polymarket_price_after_reprice is not None else "—", "inline": True},
             {"name": "Lag", "value": lag_str, "inline": True},
-            {
-                "name": "Polymarket (before → after)",
-                "value": (
-                    f"{event.polymarket_price_before:.4f} → "
-                    f"{event.polymarket_price_after:.4f}"
-                    if event.polymarket_price_after is not None
-                    else f"{event.polymarket_price_before:.4f} → ?"
-                ),
-                "inline": False,
-            },
+            {"name": "Direction match", "value": "✓" if m.direction_match else "✗", "inline": True},
+            {"name": "ID", "value": f"`{m.id[:8]}`", "inline": True},
         ],
     }
     await _post(config.DISCORD_WEBHOOK_LAG_EVENTS, {"embeds": [embed]})
 
 
-async def log_stats(stats: dict) -> None:
-    """Post rolling statistics to the STATS channel."""
-    if stats["count"] == 0:
-        content = "**Stats** — no lag measurements yet."
+async def log_stats(report: dict) -> None:
+    """Post rolling statistics (last hour) to the STATS channel."""
+    n = report.get("nb_moves_total", 0)
+    if n == 0:
+        content = "**Stats (1h)** — no lag measurements yet."
     else:
+        def _fmt(v: Optional[float]) -> str:
+            return f"{v:.0f} ms" if v is not None else "—"
+
         content = (
-            f"**Rolling lag stats** (n={stats['count']})\n"
-            f"Mean: `{stats['mean_ms']:.0f} ms` | "
-            f"Median: `{stats['median_ms']:.0f} ms` | "
-            f"P95: `{stats['p95_ms']:.0f} ms` | "
-            f"P99: `{stats['p99_ms']:.0f} ms` | "
-            f"Max: `{stats['max_ms']:.0f} ms`"
+            f"**Rolling lag stats (1h)** — {n} moves, "
+            f"{report['nb_repriced']} repriced, {report['nb_no_reprice']} no-reprice\n"
+            f"Median: `{_fmt(report['median_lag'])}` | "
+            f"P25: `{_fmt(report['p25_lag'])}` | "
+            f"P75: `{_fmt(report['p75_lag'])}` | "
+            f"P95: `{_fmt(report['p95_lag'])}` | "
+            f"Max: `{_fmt(report['max_lag'])}`\n"
+            f"Avg Binance move: `${report['avg_move_size_usd']:.2f}`  |  "
+            f"Avg Poly move: `{report['avg_polymarket_move_cents']:.2f} ¢`"
+            if report.get("avg_move_size_usd") is not None else ""
         )
     await _post(config.DISCORD_WEBHOOK_STATS, {"content": content})
 

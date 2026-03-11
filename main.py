@@ -12,7 +12,7 @@ import signal
 import sys
 
 import config
-from lag_analyzer import LagAnalyzer, BinanceTick, PolymarketTick
+from lag_analyzer import LagAnalyzer, LagMeasurement
 from binance_ws import BinanceTradeStream
 from polymarket_ws import PolymarketPriceStream
 import discord_logger
@@ -30,7 +30,17 @@ STATS_INTERVAL_S = 300
 async def run() -> None:
     config.validate_config()
 
-    analyzer = LagAnalyzer()
+    async def on_measurement(m: LagMeasurement) -> None:
+        await discord_logger.log_lag_measurement(m)
+        if analyzer.is_edge_exploitable():
+            report = analyzer.get_stats_report()
+            await discord_logger.log_alert(
+                f"Edge may be exploitable — median lag "
+                f"{report['median_lag']:.0f} ms > 3 000 ms",
+                color=0x00FF00,
+            )
+
+    analyzer = LagAnalyzer(on_measurement=on_measurement)
     stop_event = asyncio.Event()
 
     # Graceful shutdown on SIGINT / SIGTERM
@@ -39,46 +49,15 @@ async def run() -> None:
         loop.add_signal_handler(sig, stop_event.set)
 
     # ------------------------------------------------------------------
-    # Callbacks
+    # Streams (declared before callbacks so closures can reference them)
     # ------------------------------------------------------------------
 
     async def handle_significant_move(move: dict) -> None:
         await discord_logger.log_raw_tick("Binance move", move)
-        bt = BinanceTick(
-            price=move["price_after"],
-            timestamp_ms=move["timestamp_ms"],
-            received_ms=move["timestamp_ms"],
-        )
-        event = analyzer.on_binance_tick(bt)
-        if event is not None:
-            await discord_logger.log_lag_event(event)
-            if analyzer.is_lag_event(event):
-                await discord_logger.log_alert(
-                    f"Lag threshold exceeded: {event.lag_ms} ms "
-                    f"(threshold: {config.LAG_THRESHOLD_MS} ms)\n"
-                    f"Binance move: ${event.binance_move_usd:.2f} → "
-                    f"Polymarket {event.polymarket_price_before:.4f} → "
-                    f"{event.polymarket_price_after}"
-                )
+        analyzer.on_binance_move(move, poly_stream)
 
     async def handle_polymarket_update(update: dict) -> None:
-        pt = PolymarketTick(
-            price=update["mid_price"],
-            timestamp_ms=update["timestamp_ms"],
-            received_ms=update["timestamp_ms"],
-        )
         await discord_logger.log_raw_tick("Polymarket", update)
-        event = analyzer.on_polymarket_tick(pt)
-        if event is not None:
-            await discord_logger.log_lag_event(event)
-            if analyzer.is_lag_event(event):
-                await discord_logger.log_alert(
-                    f"Lag threshold exceeded: {event.lag_ms} ms "
-                    f"(threshold: {config.LAG_THRESHOLD_MS} ms)\n"
-                    f"Binance move: ${event.binance_move_usd:.2f} → "
-                    f"Polymarket {event.polymarket_price_before:.4f} → "
-                    f"{event.polymarket_price_after}"
-                )
 
     async def handle_market_expired() -> None:
         logger.warning("Polymarket market expired — update POLYMARKET_MARKET_ID in .env")
@@ -93,21 +72,27 @@ async def run() -> None:
             await asyncio.sleep(STATS_INTERVAL_S)
             if stop_event.is_set():
                 break
-            stats = analyzer.get_stats()
-            await discord_logger.log_stats(stats)
-            logger.info("Stats posted: %s", stats)
+            report = analyzer.get_stats_report()
+            await discord_logger.log_stats(report)
+            if analyzer.is_edge_exploitable():
+                await discord_logger.log_alert(
+                    f"Edge may be exploitable — median lag "
+                    f"{report['median_lag']:.0f} ms > 3 000 ms",
+                    color=0x00FF00,
+                )
+            logger.info("Stats posted: %s", report)
 
     # ------------------------------------------------------------------
     # Launch all coroutines
     # ------------------------------------------------------------------
-    binance_stream = BinanceTradeStream(
-        on_significant_move=handle_significant_move,
-        stop_event=stop_event,
-    )
     poly_stream = PolymarketPriceStream(
         token_id=config.POLYMARKET_MARKET_ID,
         on_price_update=handle_polymarket_update,
         on_market_expired=handle_market_expired,
+        stop_event=stop_event,
+    )
+    binance_stream = BinanceTradeStream(
+        on_significant_move=handle_significant_move,
         stop_event=stop_event,
     )
 
