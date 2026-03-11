@@ -1,0 +1,5 @@
+websockets>=12.0
+python-dotenv>=1.0
+aiohttp>=3.9
+numpy>=1.26
+asyncio
