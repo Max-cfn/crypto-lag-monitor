@@ -14,7 +14,7 @@ import sys
 import config
 from lag_analyzer import LagAnalyzer, BinanceTick, PolymarketTick
 from binance_ws import BinanceTradeStream
-from polymarket_ws import stream_polymarket_prices
+from polymarket_ws import PolymarketPriceStream
 import discord_logger
 
 logging.basicConfig(
@@ -61,14 +61,13 @@ async def run() -> None:
                     f"{event.polymarket_price_after}"
                 )
 
-    async def handle_polymarket_tick(tick: dict) -> None:
+    async def handle_polymarket_update(update: dict) -> None:
         pt = PolymarketTick(
-            price=tick["price"],
-            timestamp_ms=tick["timestamp_ms"],
-            received_ms=tick["received_ms"],
-            outcome=tick.get("outcome", "YES"),
+            price=update["mid_price"],
+            timestamp_ms=update["timestamp_ms"],
+            received_ms=update["timestamp_ms"],
         )
-        await discord_logger.log_raw_tick("Polymarket", tick)
+        await discord_logger.log_raw_tick("Polymarket", update)
         event = analyzer.on_polymarket_tick(pt)
         if event is not None:
             await discord_logger.log_lag_event(event)
@@ -80,6 +79,14 @@ async def run() -> None:
                     f"Polymarket {event.polymarket_price_before:.4f} → "
                     f"{event.polymarket_price_after}"
                 )
+
+    async def handle_market_expired() -> None:
+        logger.warning("Polymarket market expired — update POLYMARKET_MARKET_ID in .env")
+        await discord_logger.log_alert(
+            "Polymarket 5-min BTC market has expired.\n"
+            "Update `POLYMARKET_MARKET_ID` in `.env` and restart.",
+            color=0xFFA500,
+        )
 
     async def stats_loop() -> None:
         while not stop_event.is_set():
@@ -97,11 +104,17 @@ async def run() -> None:
         on_significant_move=handle_significant_move,
         stop_event=stop_event,
     )
+    poly_stream = PolymarketPriceStream(
+        token_id=config.POLYMARKET_MARKET_ID,
+        on_price_update=handle_polymarket_update,
+        on_market_expired=handle_market_expired,
+        stop_event=stop_event,
+    )
 
     logger.info("crypto-lag-monitor starting…")
     await asyncio.gather(
         binance_stream.run(),
-        stream_polymarket_prices(handle_polymarket_tick, stop_event),
+        poly_stream.run(),
         stats_loop(),
     )
     logger.info("crypto-lag-monitor stopped.")
