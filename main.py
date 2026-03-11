@@ -15,7 +15,7 @@ import config
 from lag_analyzer import LagAnalyzer, LagMeasurement
 from binance_ws import BinanceTradeStream
 from polymarket_ws import PolymarketPriceStream
-import discord_logger
+from discord_logger import DiscordLogger
 
 logging.basicConfig(
     level=logging.INFO,
@@ -30,14 +30,16 @@ STATS_INTERVAL_S = 300
 async def run() -> None:
     config.validate_config()
 
+    discord = DiscordLogger()
+    discord.start()
+
     async def on_measurement(m: LagMeasurement) -> None:
-        await discord_logger.log_lag_measurement(m)
+        discord.log_lag_measurement(m)
         if analyzer.is_edge_exploitable():
             report = analyzer.get_stats_report()
-            await discord_logger.log_alert(
-                f"Edge may be exploitable — median lag "
-                f"{report['median_lag']:.0f} ms > 3 000 ms",
-                color=0x00FF00,
+            discord.log_alert(
+                f"⚠️ Edge may be exploitable — median lag "
+                f"{report['median_lag']:.0f} ms > 3 000 ms"
             )
 
     analyzer = LagAnalyzer(on_measurement=on_measurement)
@@ -53,18 +55,17 @@ async def run() -> None:
     # ------------------------------------------------------------------
 
     async def handle_significant_move(move: dict) -> None:
-        await discord_logger.log_raw_tick("Binance move", move)
+        discord.log_binance_move(move)
         analyzer.on_binance_move(move, poly_stream)
 
     async def handle_polymarket_update(update: dict) -> None:
-        await discord_logger.log_raw_tick("Polymarket", update)
+        pass  # price updates feed the analyzer via poly_stream.get_current_mid()
 
     async def handle_market_expired() -> None:
         logger.warning("Polymarket market expired — update POLYMARKET_MARKET_ID in .env")
-        await discord_logger.log_alert(
-            "Polymarket 5-min BTC market has expired.\n"
-            "Update `POLYMARKET_MARKET_ID` in `.env` and restart.",
-            color=0xFFA500,
+        discord.log_alert(
+            "⚠️ Market expired, looking for new 5-min market...\n"
+            "Update `POLYMARKET_MARKET_ID` in `.env` and restart."
         )
 
     async def stats_loop() -> None:
@@ -73,13 +74,7 @@ async def run() -> None:
             if stop_event.is_set():
                 break
             report = analyzer.get_stats_report()
-            await discord_logger.log_stats(report)
-            if analyzer.is_edge_exploitable():
-                await discord_logger.log_alert(
-                    f"Edge may be exploitable — median lag "
-                    f"{report['median_lag']:.0f} ms > 3 000 ms",
-                    color=0x00FF00,
-                )
+            discord.log_stats_report(report)
             logger.info("Stats posted: %s", report)
 
     # ------------------------------------------------------------------
